@@ -31,7 +31,7 @@ Welcome to **Chess Bot**, a lightweight C++ program that plays chess using bitbo
 
 First in terminal, clone the repo by doing: 
    
-```git clone https://github.com/your-username/chess-bot.git
+```git clone https://github.com/your-username/chess-bot.git ```
 
 Then, swap into the directory
    
