@@ -31,16 +31,18 @@ Welcome to **Chess Bot**, a lightweight C++ program that plays chess using bitbo
 
 First in terminal, clone the repo by doing: 
    
-```git clone https://github.com/your-username/chess-bot.git ```
+```git clone https://github.com/your-username/chess-bot.git```
 
 Then, swap into the directory
    
-```cd chess-bot
+```cd chess-bot```
 
 And finally, use Make to build and run the bot!
    
-```make && ./chess-bot
+```make && ./chess-bot```
 
 ### Play the bot
 Currently, this is just a console app, so input the coordinate of the piece and where you would like to place it to make your move. Enter "Quit" to end the game early. 
-Visuals coming soon!
+
+
+### Visuals coming soon!
