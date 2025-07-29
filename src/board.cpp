@@ -5,6 +5,7 @@
 #include <utility>
 #include <iostream>
 #include <stdexcept>
+#include <cmath>
 
 // Initialize precomputed attack tables
 const std::array<uint64_t,64> Board::KNIGHT_ATTACKS = [](){
@@ -63,12 +64,6 @@ const std::array<uint64_t,64> Board::PAWN_ATTACKS_BLACK = [](){
     return tbl;
 }();
 
-struct MoveRecord {
-    int from, to;
-    uint64_t fromMask, toMask;
-    char movedPiece, capturedPiece;
-};
-
 // Constructor initializes the board with standard starting positions
 Board::Board() {
     whitePawns   = 0x000000000000FF00ULL;
@@ -84,6 +79,7 @@ Board::Board() {
     blackRooks   = 0x8100000000000000ULL;
     blackQueens  = 0x0800000000000000ULL;
     blackKing    = 0x1000000000000000ULL;
+    sideToMove   = WHITE;
 }
 
 // Helpers to get all pieces for white, black, or both
@@ -139,32 +135,37 @@ char Board::getPieceAtSquare(int sq) const {
     return '.';
 }
 
-// Make a move in-place and return the record needed to undo it
-#include <stdexcept>
-
 Board::MoveRecord Board::makeMove(int from, int to) {
-    // 1Verify the move is valid
+    // 1) Verify there's a piece of the right color on 'from'
     char pc = getPieceAtSquare(from);
-    if (pc == '.' || ((pc >= 'A' && pc <= 'Z') != true)) {
-        throw std::invalid_argument("makeMove: no white piece at source");
+    bool movingWhite = (sideToMove == WHITE);
+    if (pc == '.' ||
+        (movingWhite  && !(pc >= 'A' && pc <= 'Z')) ||
+        (!movingWhite && !(pc >= 'a' && pc <= 'z'))) {
+        throw std::invalid_argument("makeMove: no piece of the correct color at source");
     }
+
+    // 2) Verify target is in pseudo-legal moves
     auto pseudos = generatePseudoLegalMovesForSquare(from);
     bool found = false;
-    for (int tgt : pseudos) if (tgt == to) { found = true; break; }
+    for (int tgt : pseudos) {
+        if (tgt == to) { found = true; break; }
+    }
     if (!found) {
         throw std::invalid_argument("makeMove: target not in pseudo-legal moves");
     }
 
-    // Perform the Move (And Capture if needed)
+    // 3) Build the MoveRecord and stash sideToMove BEFORE doing anything that might undo
     MoveRecord rec;
-    rec.from         = from;
-    rec.to           = to;
-    rec.fromMask     = 1ULL << from;
-    rec.toMask       = 1ULL << to;
-    rec.movedPiece   = pc;
-    rec.capturedPiece= getPieceAtSquare(to);
+    rec.from          = from;
+    rec.to            = to;
+    rec.fromMask      = 1ULL << from;
+    rec.toMask        = 1ULL << to;
+    rec.movedPiece    = pc;
+    rec.capturedPiece = getPieceAtSquare(to);
+    rec.prevSide      = sideToMove;    // ← record who’s moving now
 
-    // Clear the captured piece if any
+    // 4) Remove any captured piece
     whitePawns   &= ~rec.toMask;
     whiteKnights &= ~rec.toMask;
     whiteBishops &= ~rec.toMask;
@@ -178,24 +179,24 @@ Board::MoveRecord Board::makeMove(int from, int to) {
     blackQueens  &= ~rec.toMask;
     blackKing    &= ~rec.toMask;
 
-    // relocate
+    // 5) Move the piece’s bitboard
     uint64_t &bb = pieceBitboard(rec.movedPiece);
     bb &= ~rec.fromMask;
     bb |= rec.toMask;
 
-    // Verify the move does not leave the king in check
-    bool isWhite = (rec.movedPiece >= 'A' && rec.movedPiece <= 'Z');
-    if (isKingInCheck(isWhite)) {
-        // Undo and throw if it does
+    // 6) Legality check: does this leave the mover’s king in check?
+    if (isKingInCheck(rec.prevSide)) {
+        // undo and bail
         unmakeMove(rec);
         throw std::invalid_argument("makeMove: move would leave king in check");
     }
 
+    // 7) All good → flip sideToMove and return record
+    sideToMove = (sideToMove == WHITE ? BLACK : WHITE);
     return rec;
 }
 
-
-// Undo a previously made move using the record
+// Undo a previously made move using the record (Needed for backtracking)
 void Board::unmakeMove(const MoveRecord &rec) {
     uint64_t &bb = pieceBitboard(rec.movedPiece);
     bb &= ~rec.toMask;
@@ -205,6 +206,8 @@ void Board::unmakeMove(const MoveRecord &rec) {
         uint64_t &cb = pieceBitboard(rec.capturedPiece);
         cb |= rec.toMask;
     }
+    
+    sideToMove = rec.prevSide;
 }
 
 //Helper Functions for square indexing and masking
@@ -238,15 +241,15 @@ static constexpr uint64_t RANK_7 = 0x00FF000000000000ULL;
 // Before I tried to manually check each square, now I use bitwise operations and precomputed masks for efficiency
 // This allows for faster move generation and better performance in the chess engine
 // Each function generates pseudo-legal moves for the respective piece type, considering the current board state
-std::vector<int> Board::generatePawnMoves(int from, bool isWhite) const {
+std::vector<int> Board::generatePawnMoves(int from) const {
     std::vector<int> moves;
     uint64_t all    = getAllPieces();
-    uint64_t own    = isWhite ? getWhitePieces() : getBlackPieces();
-    uint64_t opp    = isWhite ? getBlackPieces() : getWhitePieces();
+    uint64_t own    = sideToMove == WHITE ? getWhitePieces() : getBlackPieces();
+    uint64_t opp    = sideToMove == WHITE ? getBlackPieces() : getWhitePieces();
     uint64_t fw     = 1ULL << from;
     uint64_t push;
 
-    if (isWhite) {
+    if (sideToMove == WHITE) {
         // single push
         push = (fw << 8) & ~all;
         if (push) {
@@ -283,9 +286,9 @@ std::vector<int> Board::generatePawnMoves(int from, bool isWhite) const {
     }
     return moves;
 }
-std::vector<int> Board::generateKnightMoves(int from, bool isWhite) const {
+std::vector<int> Board::generateKnightMoves(int from) const {
     std::vector<int> moves;
-    uint64_t mask = KNIGHT_ATTACKS[from] & ~(isWhite ? getWhitePieces() : getBlackPieces());
+    uint64_t mask = KNIGHT_ATTACKS[from] & ~(sideToMove == WHITE ? getWhitePieces() : getBlackPieces());
     while (mask) {
         int t = __builtin_ctzll(mask);
         moves.push_back(t);
@@ -293,9 +296,9 @@ std::vector<int> Board::generateKnightMoves(int from, bool isWhite) const {
     }
     return moves;
 }
-std::vector<int> Board::generateKingMoves(int from, bool isWhite) const {
+std::vector<int> Board::generateKingMoves(int from) const {
     std::vector<int> moves;
-    uint64_t own  = isWhite ? getWhitePieces() : getBlackPieces();
+    uint64_t own  = sideToMove == WHITE ? getWhitePieces() : getBlackPieces();
     uint64_t mask = KING_ATTACKS[from] & ~own;
     while (mask) {
         int t = __builtin_ctzll(mask);
@@ -304,10 +307,10 @@ std::vector<int> Board::generateKingMoves(int from, bool isWhite) const {
     }
     return moves;
 }
-std::vector<int> Board::generateRookMoves(int from, bool isWhite) const {
+std::vector<int> Board::generateRookMoves(int from) const {
     std::vector<int> moves;
     uint64_t occ = getAllPieces();
-    uint64_t own = isWhite ? getWhitePieces() : getBlackPieces();
+    uint64_t own = sideToMove == WHITE ? getWhitePieces() : getBlackPieces();
     uint64_t opp = occ ^ own;
     int dirs[4] = {8, -8, 1, -1};
 
@@ -323,10 +326,10 @@ std::vector<int> Board::generateRookMoves(int from, bool isWhite) const {
     }
     return moves;
 }
-std::vector<int> Board::generateBishopMoves(int from, bool isWhite) const {
+std::vector<int> Board::generateBishopMoves(int from) const {
     std::vector<int> moves;
     uint64_t occ = getAllPieces();
-    uint64_t own = isWhite ? getWhitePieces() : getBlackPieces();
+    uint64_t own = sideToMove == WHITE ? getWhitePieces() : getBlackPieces();
     uint64_t opp = occ ^ own;
     int dirs[4] = {9, -9, 7, -7};
 
@@ -342,10 +345,10 @@ std::vector<int> Board::generateBishopMoves(int from, bool isWhite) const {
     }
     return moves;
 }
-std::vector<int> Board::generateQueenMoves(int from, bool isWhite) const {
+std::vector<int> Board::generateQueenMoves(int from) const {
     // Queen moves are rook + bishop
-    auto r = generateRookMoves(from, isWhite);
-    auto b = generateBishopMoves(from, isWhite);
+    auto r = generateRookMoves(from);
+    auto b = generateBishopMoves(from);
     r.insert(r.end(), b.begin(), b.end());
     return r;
 }
@@ -363,89 +366,122 @@ bool Board::onSameDiagonal(int f, int t, int d) const {
 }
 std::vector<int> Board::generatePseudoLegalMovesForSquare(int sq) const {
     char pc = getPieceAtSquare(sq);
-    bool isWhite = (pc >= 'A' && pc <= 'Z');
+
+    bool isWhitePiece = (pc >= 'A' && pc <= 'Z');
+    if (pc == '.' || isWhitePiece != (sideToMove == WHITE))
+    return {};
+    
     switch (pc) {
-        case 'P': case 'p': return generatePawnMoves(sq, isWhite);
-        case 'N': case 'n': return generateKnightMoves(sq, isWhite);
-        case 'B': case 'b': return generateBishopMoves(sq, isWhite);
-        case 'R': case 'r': return generateRookMoves(sq, isWhite);
-        case 'Q': case 'q': return generateQueenMoves(sq, isWhite);
-        case 'K': case 'k': return generateKingMoves(sq, isWhite);
+        case 'P': case 'p': return generatePawnMoves(sq);
+        case 'N': case 'n': return generateKnightMoves(sq);
+        case 'B': case 'b': return generateBishopMoves(sq);
+        case 'R': case 'r': return generateRookMoves(sq);
+        case 'Q': case 'q': return generateQueenMoves(sq);
+        case 'K': case 'k': return generateKingMoves(sq);
         default: return {};
     }
 }
 
 
 // Test whether square 'sq' is attacked by side 'byWhite'
-bool Board::isSquareAttacked(int sq, bool byWhite) const {
+bool Board::isSquareAttacked(int sq, Color attacker) const {
+    bool attackerIsWhite = (attacker == WHITE);
+
     uint64_t occ           = getAllPieces();
-    auto      enemyPawns   = byWhite ? whitePawns   : blackPawns;
-    auto      enemyKnights = byWhite ? whiteKnights : blackKnights;
-    auto      enemyBishops = byWhite ? whiteBishops : blackBishops;
-    auto      enemyRooks   = byWhite ? whiteRooks   : blackRooks;
-    auto      enemyQueens  = byWhite ? whiteQueens  : blackQueens;
-    auto      enemyKing    = byWhite ? whiteKing    : blackKing;
+    uint64_t enemyPawns    = attackerIsWhite ? whitePawns   : blackPawns;
+    uint64_t enemyKnights  = attackerIsWhite ? whiteKnights : blackKnights;
+    uint64_t enemyBishops  = attackerIsWhite ? whiteBishops : blackBishops;
+    uint64_t enemyRooks    = attackerIsWhite ? whiteRooks   : blackRooks;
+    uint64_t enemyQueens = attackerIsWhite ? whiteQueens : blackQueens;
+    uint64_t enemyKing = attackerIsWhite ? whiteKing : blackKing;
 
-    // Knight attacks
-    if (KNIGHT_ATTACKS[sq] & enemyKnights) return true;
+    // 1) Knight
+    if (KNIGHT_ATTACKS[sq] & enemyKnights)
+        return true;
 
-    // Pawn attacks — **SWAPPED** so White uses PAWN_ATTACKS_WHITE
-    if (byWhite) {
-        if (PAWN_ATTACKS_WHITE[sq] & whitePawns) return true;
+   // 2) Pawn attacks
+    if (attackerIsWhite) {
+    bool pawnHit = (PAWN_ATTACKS_BLACK[sq] & enemyPawns);
+    if (pawnHit) {
+        // std::cerr << "  [DEBUG] White pawn attack detected on sq " 
+        //         << Board::idxToCoord(sq) << "\n";
+        return true;
+    }
     } else {
-        if (PAWN_ATTACKS_BLACK[sq] & blackPawns) return true;
+    bool pawnHit = (PAWN_ATTACKS_WHITE[sq] & enemyPawns);
+    if (pawnHit) {
+        // std::cerr << "  [DEBUG] Black pawn attack detected on sq " 
+        //         << Board::idxToCoord(sq) << "\n";
+        return true;
+    }
     }
 
-    // King proximity
+    // 3) King proximity
     if (KING_ATTACKS[sq] & enemyKing) return true;
-    // Sliding attacks: rook-like
-    for (int dir : {8, -8, 1, -1}) {
-        for (int t = sq + dir; t >= 0 && t < 64 && onSameLine(sq, t, dir); t += dir) {
-            uint64_t m = 1ULL << t;
+
+    // 4) Rook/Queen sliders
+    for (int dir : {8,-8,1,-1}) {
+        for (int t = sq + dir;
+             t >= 0 && t < 64 && onSameLine(sq,t,dir);
+             t += dir) {
+            uint64_t m = 1ULL<<t;
             if (occ & m) {
-                if ((enemyRooks | enemyQueens) & m) return true;
+                if ((enemyRooks|enemyQueens) & m) return true;
                 break;
             }
         }
     }
 
-    // Sliding attacks: bishop-like
-    for (int dir : {9, -9, 7, -7}) {
-        for (int t = sq + dir; t >= 0 && t < 64 && onSameDiagonal(sq, t, dir); t += dir) {
-            uint64_t m = 1ULL << t;
+    // 5) Bishop/Queen sliders
+    for (int dir : {9,-9,7,-7}) {
+        for (int t = sq + dir;
+             t >= 0 && t < 64 && onSameDiagonal(sq,t,dir);
+             t += dir) {
+            uint64_t m = 1ULL<<t;
             if (occ & m) {
-                if ((enemyBishops | enemyQueens) & m) return true;
+                if ((enemyBishops|enemyQueens) & m) return true;
                 break;
             }
         }
     }
+
+    // std::cerr << "[DBG] e8 not attacked by "
+    //         << (attackerIsWhite ? "WHITE\n" : "BLACK\n");
 
     return false;
 }
 
-
-// King-in-check uses square-attacked
-bool Board::isKingInCheck(bool isWhite) const {
-    uint64_t kingBB = isWhite ? whiteKing : blackKing;
+bool Board::isKingInCheck(Color c) const {
+    uint64_t kingBB = (c == WHITE ? whiteKing : blackKing);
     if (!kingBB) return false;
     int kingSq = __builtin_ctzll(kingBB);
-    // “!isWhite” means “is it attacked by the opposite color?”
-    return isSquareAttacked(kingSq, !isWhite);
+
+    // the attacker is the opposite color
+    Color attacker = (c == WHITE ? BLACK : WHITE);
+    return isSquareAttacked(kingSq, attacker);
 }
 
-
 // Generate all legal moves by making/unmaking and checking
-std::vector<std::pair<int,int>> Board::generateAllLegalMoves(bool isWhite) {
+std::vector<std::pair<int,int>> Board::generateAllLegalMoves() {
     std::vector<std::pair<int,int>> legal;
-    uint64_t pieces = isWhite ? getWhitePieces() : getBlackPieces();
+    uint64_t pieces = (sideToMove == WHITE)
+                        ? getWhitePieces()
+                        : getBlackPieces();
 
     for (int from = 0; from < 64; ++from) {
         if (!(pieces & (1ULL << from))) continue;
         auto targets = generatePseudoLegalMovesForSquare(from);
         for (int to : targets) {
-            Board::MoveRecord rec = const_cast<Board*>(this)->makeMove(from, to);
-            if (!isSquareAttacked(__builtin_ctzll(isWhite?whiteKing:blackKing), !isWhite))
-                legal.emplace_back(from, to);
+            MoveRecord rec;
+            try {
+                // try to make the move; makeMove will throw if it leaves king in check
+                rec = makeMove(from, to);
+            } catch (const std::invalid_argument&) {
+                // illegal (king in check) → skip
+                continue;
+            }
+            // if we got here, makeMove succeeded, so it’s legal
+            legal.emplace_back(from, to);
             unmakeMove(rec);
         }
     }
