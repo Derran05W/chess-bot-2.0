@@ -419,7 +419,7 @@ bool Board::isSquareAttacked(int sq, Color attacker) const {
     // 3) King proximity
     if (KING_ATTACKS[sq] & enemyKing) return true;
 
-    // 4) Rook/Queen sliders
+    // 4) Rook/Queen attacks
     for (int dir : {8,-8,1,-1}) {
         for (int t = sq + dir;
              t >= 0 && t < 64 && onSameLine(sq,t,dir);
@@ -432,7 +432,7 @@ bool Board::isSquareAttacked(int sq, Color attacker) const {
         }
     }
 
-    // 5) Bishop/Queen sliders
+    // 5) Bishop/Queen attacks
     for (int dir : {9,-9,7,-7}) {
         for (int t = sq + dir;
              t >= 0 && t < 64 && onSameDiagonal(sq,t,dir);
